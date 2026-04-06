@@ -29,7 +29,7 @@ version = "0.5.1"
 description = "🤗 LeRobot: State-of-the-art Machine Learning for Real-World Robotics in Pytorch"
 dynamic = ["readme"]
 license = { text = "Apache-2.0" }
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 authors = [
     { name = "Rémi Cadène", email = "re.cadene@gmail.com" },
     { name = "Simon Alibert", email = "alibert.sim@gmail.com" },
@@ -66,7 +66,7 @@ dependencies = [
     "accelerate>=1.10.0,<2.0.0",
 
     # Core dependencies
-    "numpy>=2.0.0,<2.3.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Upper bound imposed by opencv-python-headless.
+    "numpy>=1.26.0,<2.3.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Lower bound relaxed for Python 3.11 compat.
     "setuptools>=71.0.0,<81.0.0",
     "cmake>=3.29.0.1,<4.2.0",
     "packaging>=24.2,<26.0",
