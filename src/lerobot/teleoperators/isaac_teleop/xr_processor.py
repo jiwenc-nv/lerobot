@@ -31,31 +31,50 @@ from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeatur
 from lerobot.processor import ProcessorStepRegistry, RobotActionProcessorStep
 from lerobot.types import RobotAction
 
+# Frame change: OpenXR (X=Right, Y=Up, Z=Backward) → robot (X=Forward, Y=Left, Z=Up).
+_OPENXR_TO_ROBOT = np.array([
+    [ 0,  0, -1],
+    [-1,  0,  0],
+    [ 0,  1,  0],
+], dtype=np.float64)
+
+
+def _remap_openxr_to_robot(pos: np.ndarray, quat_xyzw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Remap position and quaternion from OpenXR frame to robot frame."""
+    pos_new = (_OPENXR_TO_ROBOT @ pos).astype(np.float32)
+
+    R_old = Rotation.from_quat(quat_xyzw)
+    R_new = Rotation.from_matrix(_OPENXR_TO_ROBOT @ R_old.as_matrix() @ _OPENXR_TO_ROBOT.T)
+    quat_new = R_new.as_quat().astype(np.float32)
+
+    return pos_new, quat_new
+
 
 @ProcessorStepRegistry.register("map_xr_action_to_robot_action")
 @dataclass
 class MapXRActionToRobotAction(RobotActionProcessorStep):
     """Maps ``IsaacTeleopController`` output to the robot action format.
 
-    The XR controller reports *absolute* world-space poses, but the
-    downstream ``EEReferenceAndDelta`` processor expects *relative deltas*.
-    On the first enabled frame this step captures the controller pose as
-    the origin and outputs the displacement from that origin on every
-    subsequent frame.
+    The XR controller reports *absolute* world-space poses in the OpenXR
+    coordinate frame.  This step:
+
+    1. Remaps the pose from OpenXR frame (X=Right, Y=Up, Z=Backward) to
+       the robot frame (X=Forward, Y=Left, Z=Up).
+    2. Captures the first frame as the origin and outputs *relative deltas*
+       from that origin, which is what ``EEReferenceAndDelta`` expects.
 
     Input keys (from ``IsaacTeleopController.get_action()``):
-        - ``ee_pos``: ``np.ndarray`` shape ``(3,)`` — EE position (absolute)
-        - ``ee_quat``: ``np.ndarray`` shape ``(4,)`` — EE quaternion ``(x,y,z,w)`` (absolute)
+        - ``ee_pos``: ``np.ndarray`` shape ``(3,)`` — EE position (absolute, OpenXR frame)
+        - ``ee_quat``: ``np.ndarray`` shape ``(4,)`` — EE quaternion ``(x,y,z,w)`` (absolute, OpenXR frame)
         - ``gripper``: ``float`` — ``-1.0`` (closed) or ``1.0`` (open)
 
     Output keys (for ``EEReferenceAndDelta``):
         - ``enabled``: ``bool`` — always ``True`` while connected
-        - ``target_x``, ``target_y``, ``target_z``: ``float`` — EE position delta from origin
-        - ``target_wx``, ``target_wy``, ``target_wz``: ``float`` — EE rotation delta as rotvec
+        - ``target_x``, ``target_y``, ``target_z``: ``float`` — EE position delta from origin (robot frame)
+        - ``target_wx``, ``target_wy``, ``target_wz``: ``float`` — EE rotation delta as rotvec (robot frame)
         - ``gripper_vel``: ``float`` — gripper velocity command
     """
 
-    _enabled_prev: bool = field(default=False, init=False, repr=False)
     _origin_pos: np.ndarray | None = field(default=None, init=False, repr=False)
     _origin_rot_inv: Rotation | None = field(default=None, init=False, repr=False)
 
@@ -64,6 +83,8 @@ class MapXRActionToRobotAction(RobotActionProcessorStep):
         ee_quat = action.pop("ee_quat")
         gripper_cmd = action.pop("gripper")
 
+        # Remap from OpenXR frame to robot frame
+        ee_pos, ee_quat = _remap_openxr_to_robot(ee_pos, ee_quat)
         rot = Rotation.from_quat(ee_quat)
 
         # Capture origin on first frame
