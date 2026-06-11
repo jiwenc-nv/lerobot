@@ -140,7 +140,16 @@ av-dep = ["av>=15.0.0,<16.0.0"]
 pygame-dep = ["pygame>=2.5.1,<2.7.0"]
 # NOTE: 0.9.16 links against liburdfdom_sensor.so.4, which is unavailable on Ubuntu 24.04
 # (noble ships urdfdom 3.x). Cap below 0.9.16 until system urdfdom 4.x is broadly available.
-placo-dep = ["placo>=0.9.6,<0.9.16"]
+#
+# cmeel-urdfdom / cmeel-tinyxml2 are pinned to their current ABI on purpose: the cmeel
+# binary wheels in this stack (placo, pin/pinocchio, dex-retargeting) are hard-linked to
+# specific sonames (liburdfdom_*.so.4.0, libtinyxml2.so.10) but declare only `>=` floors.
+# The 2026-05-21 major bumps (cmeel-urdfdom 6.0.0 -> .so.6, cmeel-tinyxml2 11.0.0 -> .so.11)
+# ship newer sonames, so left unpinned the resolver grabs them and every import fails at
+# load with e.g. "liburdfdom_sensor.so.4.0: cannot open shared object file". These match
+# Isaac Teleop's own guard (Teleop/src/core/python/requirements-grounding.txt); keep them
+# in sync with the sonames the placo/pin wheels are built against.
+placo-dep = ["placo>=0.9.6,<0.9.16", "cmeel-urdfdom>=4,<5", "cmeel-tinyxml2<11"]
 transformers-dep = ["transformers>=5.4.0,<5.6.0"]
 grpcio-dep = ["grpcio==1.73.1", "protobuf>=6.31.1,<6.32.0"]
 can-dep = ["python-can>=4.2.0,<5.0.0"]
