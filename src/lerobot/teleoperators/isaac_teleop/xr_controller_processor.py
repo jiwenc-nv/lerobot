@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.processor import ProcessorStepRegistry, RobotActionProcessorStep
 from lerobot.types import RobotAction
+from lerobot.utils.rotation import Rotation
 
 # Gripper closedness [0, 1] -> motor units [0, 100] (RANGE_0_100). The affine
 # direction (and any polarity flip) lives here; there is no separate invert knob.
@@ -55,23 +56,26 @@ class MapXRControllerActionToRobotAction(RobotActionProcessorStep):
     *absolute* base-frame target. Each frame it:
 
     - writes ``ee.x/y/z = ee_pose[:3]`` (the absolute base-frame position target);
-    - writes ``ee.wx/wy/wz = 0`` — orientation is unconstrained; the IK runs
-      position-only (``orientation_weight=0.0``), so on the 5-DOF SO-101 the wrist
-      roll/pitch/yaw are left to the solver. All six ``ee.*`` components must be
-      present for ``InverseKinematicsEEToJoints`` to accept the action;
+    - writes ``ee.wx/wy/wz`` = the rotvec of the absolute base-frame orientation
+      target ``ee_pose[3:7]`` (the controller grip quaternion, already clutch-rebased
+      upstream). ``InverseKinematicsEEToJoints`` reads these as a rotvec orientation
+      target; with a small ``orientation_weight`` the 5-DOF SO-101 tracks it softly
+      (position dominates). All six ``ee.*`` components must be present for the IK
+      step to accept the action;
     - writes ``ee.gripper_pos = (1 - closedness) * _GRIPPER_MOTOR_SCALE`` (absolute jaw
       target in motor units ``[0, 100]``, RANGE_0_100; the SO-101 calibrates 100=open,
       0=closed, so closedness is inverted here), passed straight through to
       ``gripper.pos`` by the IK step.
 
     Input keys (from the owning loop's clutch):
-        - ``ee_pose``: ``np.ndarray`` shape ``(7,)`` — ``[x,y,z,qx,qy,qz,qw]`` (base frame);
-          only the position ``[:3]`` is used (position-only IK).
+        - ``ee_pose``: ``np.ndarray`` shape ``(7,)`` — ``[x,y,z,qx,qy,qz,qw]`` (base frame),
+          the clutch-rebased absolute position + orientation target.
         - ``closedness``: ``float`` — jaw closedness in ``[0, 1]`` (0=open, 1=closed).
 
     Output keys:
         - ``ee.x``, ``ee.y``, ``ee.z``: ``float`` — absolute base-frame position target [m].
-        - ``ee.wx``, ``ee.wy``, ``ee.wz``: ``float`` — zeros (orientation unconstrained).
+        - ``ee.wx``, ``ee.wy``, ``ee.wz``: ``float`` — absolute base-frame orientation
+          target as a rotvec [rad].
         - ``ee.gripper_pos``: ``float`` — absolute jaw target in motor units ``[0, 100]``.
     """
 
@@ -82,10 +86,12 @@ class MapXRControllerActionToRobotAction(RobotActionProcessorStep):
         action["ee.x"] = float(ee_pose[0])
         action["ee.y"] = float(ee_pose[1])
         action["ee.z"] = float(ee_pose[2])
-        # Orientation unconstrained: IK runs position-only (orientation_weight=0.0).
-        action["ee.wx"] = 0.0
-        action["ee.wy"] = 0.0
-        action["ee.wz"] = 0.0
+        # Orientation target as a rotvec (quat [qx,qy,qz,qw] -> axis-angle); the IK
+        # consumes ee.w* as a rotvec and tracks it with orientation_weight.
+        rotvec = Rotation.from_quat(ee_pose[3:7]).as_rotvec()
+        action["ee.wx"] = float(rotvec[0])
+        action["ee.wy"] = float(rotvec[1])
+        action["ee.wz"] = float(rotvec[2])
         # Inverted: closedness c=1 (closed) -> 0, c=0 (open) -> 100 (SO-101 calibration).
         action["ee.gripper_pos"] = (1.0 - closedness) * _GRIPPER_MOTOR_SCALE
         return action

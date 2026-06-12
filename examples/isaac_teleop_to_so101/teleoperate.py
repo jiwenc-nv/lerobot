@@ -24,16 +24,19 @@ latches the controller origin on engage and drives the EE from the delta, so the
 device carries no per-frame state::
 
     XRController.get_action()                       # raw base-frame grip_pos/grip_quat + squeeze + trigger
-      -> Clutch.rebase(grip_pos)                     # ee_pose = home + scale*(grip_pos - origin_at_engage)
-      -> MapXRControllerActionToRobotAction          # ee.x/y/z = abs pose, ee.w* = 0, ee.gripper_pos = f(trigger)
-      -> EEBoundsAndSafety                           # workspace clip + per-frame jump clamp
-      -> InverseKinematicsEEToJoints(ow=0.0)         # position-only Placo IK (passes ee.gripper_pos -> gripper.pos)
+      -> Clutch.rebase(grip_pos, grip_quat)          # ee_pose = engage-relative delta applied to the EE home (pos + orient)
+      -> MapXRControllerActionToRobotAction          # ee.x/y/z = abs pos, ee.w* = abs orient rotvec, ee.gripper_pos = f(trigger)
+      -> EEBoundsAndSafety                           # workspace clip + per-frame jump clamp (position only)
+      -> InverseKinematicsEEToJoints(ow=small)       # soft-orientation Placo IK (passes ee.gripper_pos -> gripper.pos)
 
 Squeeze (and hold) the controller grip past ``clutch_threshold`` to engage; on the
-engage edge the clutch latches its origin to the current controller position and
-its home to the last commanded EE pose, so the arm does not jump. Orientation is
-left to the position-only IK (no wrist-roll/pitch channel in this simple version);
-the analog trigger drives an absolute ``ee.gripper_pos`` jaw target.
+engage edge the clutch latches its origin to the current controller pose and its
+home to the last commanded EE pose, so the arm does not jump in position OR
+orientation. The clutch rebases BOTH position and orientation (engage-relative
+base-frame deltas); the orientation target is fed to the IK with a small weight
+(``IK_ORIENTATION_WEIGHT``) so the wrist follows the hand while position dominates
+(the 5-DOF SO-101 cannot fully realize an arbitrary orientation). The analog
+trigger drives an absolute ``ee.gripper_pos`` jaw target.
 
 Startup / safety contract: by default the script slews all joints to their URDF
 origin (arm joints to 0°, gripper to 100 = fully open) over ``--reset-duration``
@@ -76,6 +79,7 @@ from lerobot.teleoperators.isaac_teleop import (
 )
 from lerobot.types import RobotAction, RobotObservation
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.rotation import Rotation
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 FPS = 30
@@ -90,6 +94,14 @@ MAX_EE_STEP_M = 0.1
 
 # Controller-to-EE translation gain (1.0 = 1:1 controller motion -> EE motion).
 CLUTCH_POSITION_SCALE = 1.0
+
+# Orientation weight for the IK. Small but nonzero: the controller's (clutch-rebased)
+# orientation is fed to the solver as a soft target so the wrist follows the hand,
+# but position still dominates. The SO-101 is 5-DOF and CANNOT realize an arbitrary
+# 3-DOF orientation, so the wrist tracks orientation only partially by design — turn
+# this up to favor orientation over position, down (or 0.0) for position-only.
+# TODO(tune-on-hardware).
+IK_ORIENTATION_WEIGHT = 0.05
 
 # CloudXR device-profile env file passed to the launcher (see webxr.env next to
 # this script). Resolved absolutely so it loads regardless of the working dir.
@@ -121,41 +133,66 @@ RESET_ORIGIN_DEG: dict[str, float] = {
 
 
 class Clutch:
-    """Engage-relative position clutch: rebases controller motion onto the EE.
+    """Engage-relative clutch for both position AND orientation.
 
     Mirrors Isaac Teleop's ``SO101ClutchRetargeter`` but lives in this loop so the
-    device can stay a thin raw-pose reader. State:
+    device can stay a thin raw-pose reader. Clutching is the same idea for both
+    channels — latch an origin on engage, then track the base-frame delta from it —
+    applied independently to position and orientation. State:
 
-    - ``_last_commanded``: the EE position [m] the loop last commanded; held while
-      disengaged so the arm freezes where it was left.
-    - ``_home`` / ``_origin``: latched on the engage edge (see :meth:`engage`) — the
-      EE home and the controller origin the per-frame delta is measured against.
+    - ``_last_commanded_pos`` / ``_last_commanded_rot``: the EE pose the loop last
+      commanded; held while disengaged so the arm freezes where it was left.
+    - ``_home_pos`` / ``_home_rot``: latched on the engage edge — the EE pose the
+      per-frame delta is applied to.
+    - ``_origin_pos`` / ``_origin_rot``: latched on the engage edge — the controller
+      pose the per-frame delta is measured against.
 
-    Each engaged frame :meth:`rebase` returns ``home + scale * (grip_pos - origin)``.
-    On the engage edge ``grip_pos == origin`` so the output is exactly ``home`` (==
-    the last commanded pose), i.e. no teleport. A mid-task re-clutch (release,
-    reposition the hand, re-squeeze) latches a fresh home/origin, so the EE resumes
-    from where it was left and tracks the new delta.
+    Each engaged frame :meth:`rebase` returns::
+
+        pos = home_pos + scale * (grip_pos - origin_pos)
+        rot = (R_ctrl @ R_origin^-1) @ R_home        # base-frame delta, left-composed
+
+    On the engage edge ``grip_pos == origin_pos`` and ``R_ctrl == R_origin``, so the
+    output is exactly the home pose (== the last commanded pose), i.e. no teleport in
+    position OR orientation. The orientation delta is expressed in the base frame
+    (left multiply), so rotating the hand 30° about base Z rotates the EE 30° about
+    base Z — matching the position convention the operator sees in the room. A
+    mid-task re-clutch latches a fresh home/origin, so the EE resumes from where it
+    was left and tracks the new delta.
+
+    NOTE: ``_home_rot`` is the last *commanded* orientation, not the achieved one. On
+    the 5-DOF SO-101 the arm cannot fully realize an arbitrary orientation, so the
+    commanded and achieved wrist orientation differ — but the commanded signal is
+    continuous across a re-clutch, so there is still no jump.
     """
 
-    def __init__(self, home_pos: np.ndarray, scale: float = CLUTCH_POSITION_SCALE):
-        # Seed the held pose from the arm's measured startup EE position so the
-        # first engage latches home there (no jump on the first squeeze).
-        self._last_commanded = np.asarray(home_pos, dtype=float).copy()
-        self._home = self._last_commanded.copy()
-        self._origin = np.zeros(3, dtype=float)
+    def __init__(self, home_base_T_ee: np.ndarray, scale: float = CLUTCH_POSITION_SCALE):  # noqa: N803
+        # Seed the held pose from the arm's measured startup EE pose so the first
+        # engage latches home there (no jump on the first squeeze).
+        home = np.asarray(home_base_T_ee, dtype=float)
+        self._last_commanded_pos = home[:3, 3].copy()
+        self._last_commanded_rot = Rotation.from_matrix(home[:3, :3])
+        self._home_pos = self._last_commanded_pos.copy()
+        self._home_rot = self._last_commanded_rot
+        self._origin_pos = np.zeros(3, dtype=float)
+        self._origin_rot = Rotation.from_quat(np.array([0.0, 0.0, 0.0, 1.0]))
         self._scale = float(scale)
 
-    def engage(self, grip_pos: np.ndarray) -> None:
+    def engage(self, grip_pos: np.ndarray, grip_quat: np.ndarray) -> None:
         """Latch the engage home (where the arm is now) and controller origin."""
-        self._home = self._last_commanded.copy()
-        self._origin = np.asarray(grip_pos, dtype=float).copy()
+        self._home_pos = self._last_commanded_pos.copy()
+        self._home_rot = self._last_commanded_rot
+        self._origin_pos = np.asarray(grip_pos, dtype=float).copy()
+        self._origin_rot = Rotation.from_quat(np.asarray(grip_quat, dtype=float))
 
-    def rebase(self, grip_pos: np.ndarray) -> np.ndarray:
-        """Return the absolute base-frame EE target for this engaged frame [m]."""
-        ee_pos = self._home + self._scale * (np.asarray(grip_pos, dtype=float) - self._origin)
-        self._last_commanded = ee_pos.copy()
-        return ee_pos
+    def rebase(self, grip_pos: np.ndarray, grip_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return the absolute base-frame EE target ``(pos [m], quat [xyzw])`` for this frame."""
+        pos = self._home_pos + self._scale * (np.asarray(grip_pos, dtype=float) - self._origin_pos)
+        rot_ctrl = Rotation.from_quat(np.asarray(grip_quat, dtype=float))
+        rot = (rot_ctrl * self._origin_rot.inv()) * self._home_rot
+        self._last_commanded_pos = pos.copy()
+        self._last_commanded_rot = rot
+        return pos, rot.as_quat()
 
 
 def _load_reset_target(motor_names: list[str]) -> dict[str, float]:
@@ -252,10 +289,10 @@ def main():
     home_base_T_ee = kinematics_solver.forward_kinematics(q_measured_deg)  # noqa: N806
     home_pos_m = home_base_T_ee[:3, 3]
 
-    # Engage-relative clutch, seeded with the measured startup EE position so the
-    # first squeeze latches its home there (no jump on engage). Owns ALL the
-    # calibration that used to live in the Isaac Teleop retargeters.
-    clutch = Clutch(home_pos_m)
+    # Engage-relative clutch, seeded with the measured startup EE pose so the first
+    # squeeze latches its home there (no jump on engage). Owns ALL the calibration
+    # (position AND orientation) that used to live in the Isaac Teleop retargeters.
+    clutch = Clutch(home_base_T_ee)
 
     teleop_config = XRControllerConfig(
         hand_side="right",
@@ -285,10 +322,10 @@ def main():
                 max_ee_step_m=MAX_EE_STEP_M,
                 raise_on_jump=False,
             ),
-            # Pure position IK (orientation_weight=0.0): the SO-101 is 5-DOF and cannot
-            # track a full 6-DOF pose; a non-zero orientation weight fights position
-            # tracking on the redundant joints. The wrist roll/pitch/yaw are left to
-            # the solver in this simple version (no operator orientation channel).
+            # Soft-orientation IK (orientation_weight=IK_ORIENTATION_WEIGHT): the
+            # clutch-rebased controller orientation is fed as a target so the wrist
+            # follows the hand, but the weight is small so position dominates — the
+            # SO-101 is 5-DOF and cannot realize an arbitrary 3-DOF orientation.
             # initial_guess_current_joints=True: seed each solve from the MEASURED
             # joints so the IK tracks physical reality and stays robust to external
             # moves (e.g. the hold while disengaged), rather than warm-starting from
@@ -297,7 +334,7 @@ def main():
                 kinematics=kinematics_solver,
                 motor_names=motor_names,
                 initial_guess_current_joints=True,
-                orientation_weight=0.0,
+                orientation_weight=IK_ORIENTATION_WEIGHT,
             ),
         ],
         to_transition=robot_action_observation_to_transition,
@@ -340,6 +377,7 @@ def main():
         xr_action = teleop_device.get_action()
 
         grip_pos = np.asarray(xr_action["grip_pos"], dtype=float)
+        grip_quat = np.asarray(xr_action["grip_quat"], dtype=float)
         squeeze = float(xr_action["squeeze"])
         trigger = float(xr_action["trigger"])
         enabled = squeeze > teleop_config.clutch_threshold
@@ -351,14 +389,14 @@ def main():
         # On the engage edge, latch the clutch home (current arm EE) and the
         # controller origin so the per-frame delta starts at zero (no jump).
         if _is_engage_frame:
-            clutch.engage(grip_pos)
+            clutch.engage(grip_pos, grip_quat)
 
         # ── Debug: clutch engage ──────────────────────────────────────────────
         if _is_engage_frame:
             _engage_count += 1
             print(f"\n[DEBUG] ── Clutch ENGAGE #{_engage_count} ─────────────────────────────")
             print(f"[DEBUG]   grip_pos at engage [m]: {grip_pos}")
-            print(f"[DEBUG]   clutch home (EE)   [m]: {clutch._home}  ← arm holds here on engage")
+            print(f"[DEBUG]   clutch home (EE)   [m]: {clutch._home_pos}  ← arm holds here on engage")
             print("[DEBUG]   robot measured joints at engage:")
             for name in motor_names:
                 print(f"[DEBUG]     {name:20s} = {float(robot_obs[f'{name}.pos']):+.3f} deg")
@@ -372,11 +410,12 @@ def main():
         # stays exactly where it is — launching the script (clutch released) never
         # moves it, and releasing the clutch mid-session freezes it in place.
         if enabled:
-            # Rebase the raw grip pose onto the EE, then run the post-processing
-            # pipeline (rename -> bounds -> IK). closedness from the trigger.
-            ee_pos = clutch.rebase(grip_pos)
+            # Rebase the raw grip pose (position AND orientation) onto the EE, then
+            # run the post-processing pipeline (rename -> bounds -> IK). closedness
+            # from the trigger.
+            ee_pos, ee_quat = clutch.rebase(grip_pos, grip_quat)
             ee_action = {
-                "ee_pose": np.concatenate([ee_pos, xr_action["grip_quat"]]).astype(np.float32),
+                "ee_pose": np.concatenate([ee_pos, ee_quat]).astype(np.float32),
                 "closedness": trigger,
             }
             joint_action = xr_to_robot_joints_processor((ee_action, robot_obs))
@@ -386,7 +425,7 @@ def main():
         # ── Debug: per-second heartbeat (while engaged) ───────────────────────
         _heartbeat_frame += 1
         if enabled and _heartbeat_frame % FPS == 0:
-            delta = ee_pos - clutch._home
+            delta = ee_pos - clutch._home_pos
             print(f"[DEBUG] heartbeat t={_heartbeat_frame//FPS}s | ee_pos={ee_pos} | Δ_from_home={delta}")
 
         # ── Debug: IK-commanded joints vs measured on engage frame ────────────

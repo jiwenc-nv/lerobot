@@ -81,12 +81,20 @@ def test_mapper_is_stateless_across_frames():
     assert np.allclose(_ee(out), [1.0, 2.0, 3.0])
 
 
-def test_mapper_orientation_is_zero():
-    # Position-only IK: the orientation target is always the zero rotvec, and the
-    # ee_pose quaternion is ignored (no operator orientation channel).
+def test_mapper_identity_quat_is_zero_rotvec():
+    # The identity grip quaternion maps to the zero rotvec orientation target.
     step = MapXRControllerActionToRobotAction()
-    out = step.action(_make_action([1.0, 2.0, 3.0], quat=(0.1, 0.2, 0.3, 0.927)))
+    out = step.action(_make_action([1.0, 2.0, 3.0]))  # identity quat
     assert np.allclose(_ee_orientation(out), 0.0, atol=1e-12)
+
+
+def test_mapper_orientation_is_quat_as_rotvec():
+    # ee.w* is the rotvec of the ee_pose quaternion. A 90 deg rotation about z
+    # (quat [0, 0, sin45, cos45]) maps to the rotvec [0, 0, pi/2].
+    step = MapXRControllerActionToRobotAction()
+    s, c = np.sin(np.pi / 4), np.cos(np.pi / 4)
+    out = step.action(_make_action([0.0, 0.0, 0.0], quat=(0.0, 0.0, s, c)))
+    assert np.allclose(_ee_orientation(out), [0.0, 0.0, np.pi / 2], atol=1e-6)
 
 
 def test_mapper_emits_all_six_ee_components():
