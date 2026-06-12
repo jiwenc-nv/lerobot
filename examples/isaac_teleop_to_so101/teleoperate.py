@@ -26,7 +26,7 @@ IK path::
     XRController.get_action()                       # clutch-rebased abs EE pose + roll + pitch + closedness + clutch
       -> MapXRControllerActionToRobotAction         # ee.x/y/z = abs pose, ee.w* = pitch rotvec, ee.gripper_pos, wrist_roll [rad]
       -> EEBoundsAndSafety                           # workspace clip + per-frame jump clamp
-      -> InverseKinematicsEEToJoints(ow=0.1)         # position + soft-pitch Placo IK (passes ee.gripper_pos -> gripper.pos)
+      -> InverseKinematicsEEToJoints(ow=0.0)         # position-only Placo IK (passes ee.gripper_pos -> gripper.pos)
       -> OverwriteWristRollFromAngle                 # wrist_roll [rad] -> wrist_roll.pos [deg]
 
 Squeeze (and hold) the controller grip past ``clutch_threshold`` to engage; the
@@ -239,23 +239,17 @@ def main():
                 max_ee_step_m=MAX_EE_STEP_M,
                 raise_on_jump=False,
             ),
-            # Position + soft-pitch IK. orientation_weight=0.1 (small) lets the 4
-            # position-capable joints track the absolute wrist-pitch target carried in
-            # ee.w* while position stays dominant -- the LeRobot analogue of Lab's
-            # reduced 3-pos + 1-pitch IK. The SO-101 is 5-DOF, so the terminal roll is
-            # still under-determined and recovered separately below (yaw is left free).
-            # No GripperVelocityToJoint: the absolute ee.gripper_pos (motor units
-            # [0,100]) is passed straight to gripper.pos. initial_guess_current_joints=
-            # True is REQUIRED: it re-seeds the IK from the measured joints every frame,
-            # so OverwriteWristRollFromAngle writing wrist_roll.pos after IK does not
-            # drift the IK seed.
-            # TODO(tune-on-hardware): tune orientation_weight; too high fights position
-            # tracking on the redundant arm, too low ignores the pitch command.
+            # Pure position IK (orientation_weight=0.0): the SO-101 is 5-DOF and cannot
+            # track a full 6-DOF pose; a non-zero orientation weight fights position
+            # tracking on the redundant joints. Wrist roll is recovered post-IK by
+            # OverwriteWristRollFromAngle; yaw and pitch are left free.
+            # initial_guess_current_joints=False: use the previous IK solution as the
+            # seed for smoother, branch-consistent joint trajectories frame-to-frame.
             InverseKinematicsEEToJoints(
                 kinematics=kinematics_solver,
                 motor_names=motor_names,
-                initial_guess_current_joints=True,
-                orientation_weight=0.1,
+                initial_guess_current_joints=False,
+                orientation_weight=0.0,
             ),
             # Post-IK: write the operator's wrist roll [rad] onto wrist_roll.pos [deg],
             # overriding the under-determined IK roll on the 5-DOF arm.
