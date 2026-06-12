@@ -253,6 +253,16 @@ def parse_args():
         metavar="SEC",
         help=f"Duration in seconds for the reset-to-origin slew (default: {RESET_DURATION_S}).",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read-only validation mode: run the full clutch + IK pipeline and log/print "
+             "everything, but NEVER command the arm (no reset slew, no send_action). The arm, "
+             "if connected, stays still; if no arm is connected the clutch home is seeded from "
+             "the reset target instead of measured joints. Use this to validate the frame "
+             "mapping, squeeze/trigger ranges, and the FK round-trip safely before driving the "
+             "robot — move the controller and watch the [DRY] grip_pos(base) readout.",
+    )
     return parser.parse_args()
 
 
@@ -276,16 +286,37 @@ def main():
         joint_names=motor_names,
     )
 
-    # Connect the robot FIRST so the slew and clutch-home seed can use live
-    # joint readings. With --reset-to-origin (default) the arm is smoothly moved
-    # to URDF origin before the teleop loop starts; the clutch home is then seeded
-    # from the post-slew measured pose so the first engage is jump-free.
-    # Pass --no-reset-to-origin to skip the slew entirely.
-    robot.connect()
-    if args.reset_to_origin:
-        move_to_origin(robot, motor_names, args.reset_duration)
-    obs0 = robot.get_observation()
-    q_measured_deg = np.array([float(obs0[f"{name}.pos"]) for name in motor_names], dtype=float)
+    # Connect the robot FIRST so the slew and clutch-home seed can use live joint
+    # readings. With --reset-to-origin (default) the arm is smoothly moved to URDF
+    # origin before the teleop loop starts; the clutch home is then seeded from the
+    # post-slew measured pose so the first engage is jump-free. Pass
+    # --no-reset-to-origin to skip the slew entirely.
+    #
+    # In --dry-run the arm is never commanded: the reset slew is skipped, and a
+    # missing/unconnectable arm is tolerated (the clutch home falls back to the
+    # reset-target FK) so the frame mapping can be validated at a desk without one.
+    robot_connected = False
+    if args.dry_run:
+        print("[DRY-RUN] Read-only mode: the arm will NOT be commanded.")
+        try:
+            robot.connect()
+            robot_connected = True
+        except Exception as e:  # noqa: BLE001  (bring-up convenience: any connect failure -> no-arm)
+            print(f"[DRY-RUN] Arm not connected ({type(e).__name__}: {e}); continuing without it.")
+    else:
+        robot.connect()
+        robot_connected = True
+        if args.reset_to_origin:
+            move_to_origin(robot, motor_names, args.reset_duration)
+
+    if robot_connected:
+        obs0 = robot.get_observation()
+        q_measured_deg = np.array([float(obs0[f"{name}.pos"]) for name in motor_names], dtype=float)
+    else:
+        # No arm: assume it sits at the reset target (the seed only sets the clutch
+        # home; nothing is commanded in dry-run anyway).
+        reset_target = _load_reset_target(motor_names)
+        q_measured_deg = np.array([reset_target[name] for name in motor_names], dtype=float)
     home_base_T_ee = kinematics_solver.forward_kinematics(q_measured_deg)  # noqa: N806
     home_pos_m = home_base_T_ee[:3, 3]
 
@@ -346,8 +377,12 @@ def main():
 
     init_rerun(session_name="xr_so101_teleop")
 
-    if not robot.is_connected or not teleop_device.is_connected:
-        raise ValueError("Robot or teleop is not connected!")
+    if not teleop_device.is_connected:
+        raise ValueError("Teleop is not connected!")
+    # The arm is required to actually drive the robot; in --dry-run we tolerate its
+    # absence (nothing is commanded), so only enforce it outside dry-run.
+    if not args.dry_run and not robot_connected:
+        raise ValueError("Robot is not connected!")
 
     # ── Debug: dump startup calibration state ─────────────────────────────────
     print("\n[DEBUG] ── Startup calibration ──────────────────────────────────────")
@@ -365,15 +400,25 @@ def main():
     print("[DEBUG] ─────────────────────────────────────────────────────────────\n")
     # ──────────────────────────────────────────────────────────────────────────
 
+    # When no arm is connected (dry-run only), hold a static synthetic observation
+    # at the seed pose so the IK has a current-joint seed and the hold path works.
+    synthetic_obs = {f"{name}.pos": float(q) for name, q in zip(motor_names, q_measured_deg, strict=False)}
+
     _prev_enabled = False
     _engage_count = 0
-    _heartbeat_frame = 0
+    _frame = 0
 
-    print("Starting teleop loop. Squeeze and move the controller to teleoperate the robot...")
+    print(
+        "Starting DRY-RUN loop (arm will NOT move). Move the controller and watch the [DRY] "
+        "readout to validate frames; squeeze to engage, trigger for the gripper."
+        if args.dry_run
+        else "Starting teleop loop. Squeeze and move the controller to teleoperate the robot..."
+    )
     while True:
         t0 = time.perf_counter()
+        _frame += 1
 
-        robot_obs = robot.get_observation()
+        robot_obs = robot.get_observation() if robot_connected else synthetic_obs
         xr_action = teleop_device.get_action()
 
         grip_pos = np.asarray(xr_action["grip_pos"], dtype=float)
@@ -381,6 +426,19 @@ def main():
         squeeze = float(xr_action["squeeze"])
         trigger = float(xr_action["trigger"])
         enabled = squeeze > teleop_config.clutch_threshold
+
+        # ── Dry-run: throttled raw + base-frame readout for frame validation ──
+        # Move the controller along each room axis and watch grip_pos(base) to verify
+        # the base_T_anchor mapping; hold it still and rotate your head to verify the
+        # anchor is base-fixed (values should not move); squeeze/trigger should sweep
+        # 0.00 -> 1.00.
+        if args.dry_run and _frame % max(1, FPS // 4) == 0:
+            rotvec = Rotation.from_quat(grip_quat).as_rotvec()
+            print(
+                f"[DRY] enabled={int(enabled)} squeeze={squeeze:4.2f} trigger={trigger:4.2f} | "
+                f"grip_pos(base)={np.array2string(grip_pos, precision=3, sign='+')} "
+                f"grip_rotvec(base)={np.array2string(rotvec, precision=3, sign='+')}"
+            )
 
         # Compute once per frame; used in the debug blocks below and then
         # _prev_enabled is updated at the very bottom of the loop.
@@ -423,10 +481,9 @@ def main():
             joint_action = {f"{name}.pos": float(robot_obs[f"{name}.pos"]) for name in motor_names}
 
         # ── Debug: per-second heartbeat (while engaged) ───────────────────────
-        _heartbeat_frame += 1
-        if enabled and _heartbeat_frame % FPS == 0:
+        if enabled and _frame % FPS == 0:
             delta = ee_pos - clutch._home_pos
-            print(f"[DEBUG] heartbeat t={_heartbeat_frame//FPS}s | ee_pos={ee_pos} | Δ_from_home={delta}")
+            print(f"[DEBUG] heartbeat t={_frame//FPS}s | ee_pos={ee_pos} | Δ_from_home={delta}")
 
         # ── Debug: IK-commanded joints vs measured on engage frame ────────────
         if _is_engage_frame:
@@ -455,7 +512,9 @@ def main():
 
         _prev_enabled = enabled
 
-        _ = robot.send_action(joint_action)
+        # Never command the arm in --dry-run (it stays still, and may be absent).
+        if not args.dry_run:
+            _ = robot.send_action(joint_action)
 
         log_rerun_data(observation=xr_action, action=joint_action)
 

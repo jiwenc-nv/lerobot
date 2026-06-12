@@ -168,6 +168,21 @@ def test_base_t_anchor_default_matches_module_constant():
     assert XRControllerConfig().base_T_anchor == _DEFAULT_BASE_T_ANCHOR
 
 
+def test_base_t_anchor_axis_mapping():
+    # Pin the INTENDED axis mapping of the default base_T_anchor so a future edit to
+    # the matrix can't silently flip a sign. It rebases OpenXR anchor axes
+    # (X=right, Y=up, Z=back/toward-user) into the robot base (X=forward, Y=left,
+    # Z=up). This documents intent for hardware bring-up — confirm it matches the
+    # physical setup with the teleoperate.py --dry-run [DRY] grip_pos readout.
+    rot = np.asarray(XRControllerConfig().base_T_anchor, dtype=float)[:3, :3]
+    # controller right (anchor +X) -> robot -Y (robot +Y is left)
+    assert np.allclose(rot @ [1.0, 0.0, 0.0], [0.0, -1.0, 0.0])
+    # controller up (anchor +Y) -> robot +Z (up)
+    assert np.allclose(rot @ [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    # controller toward-user (anchor +Z) -> robot -X (robot +X is forward)
+    assert np.allclose(rot @ [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0])
+
+
 # ----------------------------------------------------------------------------
 # OverwriteWristRollFromAngle: post-IK rad -> deg overwrite
 # ----------------------------------------------------------------------------
