@@ -85,54 +85,37 @@ _DEFAULT_BASE_T_ANCHOR: list[list[float]] = [
 class XRControllerConfig(IsaacTeleopConfig):
     """Config for Isaac Teleop XR (VR) controller teleoperation.
 
-    Produces a clutch-rebased end-effector pose, a wrist-roll angle, and an
-    analog gripper closedness from a VR controller via NVIDIA Isaac Teleop's
-    ``ControllersSource`` and the three SO-101 retargeters
-    (``SO101ClutchRetargeter``, ``SO101RollRetargeter``,
-    ``SO101GripperRetargeter``).
-
-    Lifecycle: the retargeters own the clutch/roll/gripper logic and key their
-    behaviour off the session's RUNNING/STOPPED execution state. The XR device
-    derives RUNNING from the squeeze clutch and drives the session each frame
-    (see :class:`~lerobot.teleoperators.isaac_teleop.teleop_xr_controller.XRController`),
-    so the clutch latches its origin on the RUNNING edge (engage), not on connect.
+    Exposes the raw XR controller grip pose (base-frame), squeeze, and trigger
+    via NVIDIA Isaac Teleop's ``ControllersSource``. There are no retargeters:
+    the clutch (engage latch + delta rebase onto the EE) and the gripper mapping
+    live in the owning loop (see
+    :class:`~lerobot.teleoperators.isaac_teleop.teleop_xr_controller.XRController`
+    and ``examples/isaac_teleop_to_so101/teleoperate.py``).
 
     Frames: :attr:`base_T_anchor` statically rebases the controller anchor frame
-    into the robot base frame upstream of the retargeters, and
-    :attr:`home_base_T_ee` seeds the clutch's reset-origin home (the EE pose, in
-    the base frame, that the arm is commanded to at reset) so the first engage
-    does not jump.
+    into the robot base frame so the grip pose this device emits is already in the
+    robot base frame.
     """
 
     hand_side: Literal["left", "right"] = "right"
     """Which controller hand to use."""
 
     clutch_threshold: float = 0.5
-    """Squeeze value above which the clutch (``enabled``) engages.
+    """Squeeze value above which the owning loop's clutch engages.
 
-    Mirrors the phone teleoperator's hold-to-enable button: while the
-    controller squeeze is held above this threshold the teleoperator drives
-    the robot; releasing it freezes the robot and re-arms the origin latch.
+    Mirrors the phone teleoperator's hold-to-enable button: while the controller
+    squeeze is held above this threshold the owning loop drives the robot;
+    releasing it freezes the robot and re-arms the engage origin. The device only
+    reports the raw squeeze — the threshold is applied by the owning loop.
     """
 
     base_T_anchor: list[list[float]] = field(  # noqa: N815  (frameA_T_frameB transform-matrix convention)
         default_factory=lambda: _DEFAULT_BASE_T_ANCHOR
     )
     """Static 4x4 ``base_T_anchor`` transform [row-major] rebasing the OpenXR controller
-    anchor frame into the robot base frame, applied upstream of the retargeters.
+    anchor frame into the robot base frame, applied to the controller grip pose in the device.
 
     Defaults to the OpenXR (X=Right, Y=Up, Z=Backward) -> robot (X=Forward, Y=Left, Z=Up)
     rotation. Kept as plain nested lists (not numpy) so the config stays serializable; the
     device materializes it to a float32 4x4 once at construction.
-    """
-
-    home_base_T_ee: list[list[float]] | None = None  # noqa: N815  (frameA_T_frameB transform-matrix convention)
-    """Optional 4x4 ``base_T_ee`` reset-origin home transform [row-major, metres] seeding the
-    clutch retargeter's home.
-
-    This is the EE pose in the robot base frame at the arm's reset joint configuration; the
-    clutch seeds its home from its translation block on reset / first engage, so the owning
-    loop MUST command the arm to that reset pose at startup to avoid a jump on engage. ``None``
-    falls back to the retargeter's built-in constant home. Kept as plain nested lists so the
-    config stays serializable.
     """

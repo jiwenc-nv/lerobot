@@ -47,45 +47,37 @@ _GRIPPER_MOTOR_SCALE = 100.0
 @ProcessorStepRegistry.register("map_xr_controller_action_to_robot_action")
 @dataclass
 class MapXRControllerActionToRobotAction(RobotActionProcessorStep):
-    """Maps :class:`XRController` output to the closed-loop IK input contract.
+    """Maps an absolute base-frame EE pose + gripper closedness to the IK input contract.
 
-    The XR controller reports an already clutch-rebased *absolute* 7D ``ee_pose``
-    in the robot base frame — the clutch retargeter owns the engage latch and the
-    no-teleport semantics on the session RUNNING edge, so this step is a pure,
-    stateless per-frame mapping with no clutch logic of its own. Each frame it:
+    A pure, stateless per-frame rename with no clutch logic of its own: the owning
+    loop owns the clutch (latches the engage origin and rebases the controller
+    delta onto the EE), so the ``ee_pose`` reaching this step is the already-rebased
+    *absolute* base-frame target. Each frame it:
 
     - writes ``ee.x/y/z = ee_pose[:3]`` (the absolute base-frame position target);
     - writes ``ee.wx/wy/wz = 0`` — orientation is unconstrained; the IK runs
-      position-only (``orientation_weight=0.0``). The terminal roll DOF is recovered
-      separately post-IK via :class:`OverwriteWristRollFromAngle`; pitch and yaw are
-      left free. All six ``ee.*`` components must be present for
-      ``InverseKinematicsEEToJoints`` to accept the action;
+      position-only (``orientation_weight=0.0``), so on the 5-DOF SO-101 the wrist
+      roll/pitch/yaw are left to the solver. All six ``ee.*`` components must be
+      present for ``InverseKinematicsEEToJoints`` to accept the action;
     - writes ``ee.gripper_pos = (1 - closedness) * _GRIPPER_MOTOR_SCALE`` (absolute jaw
       target in motor units ``[0, 100]``, RANGE_0_100; the SO-101 calibrates 100=open,
       0=closed, so closedness is inverted here), passed straight through to
-      ``gripper.pos`` by the IK step;
-    - carries ``wrist_roll`` [rad] through for the post-IK overwrite step.
+      ``gripper.pos`` by the IK step.
 
-    Input keys (from :meth:`XRController.get_action`):
-        - ``ee_pose``: ``np.ndarray`` shape ``(7,)`` — ``[x,y,z,qx,qy,qz,qw]`` (base frame).
-        - ``wrist_roll``: ``float`` — wrist-roll angle [rad].
-        - ``wrist_pitch``: ``float`` — dropped; not used with position-only IK.
+    Input keys (from the owning loop's clutch):
+        - ``ee_pose``: ``np.ndarray`` shape ``(7,)`` — ``[x,y,z,qx,qy,qz,qw]`` (base frame);
+          only the position ``[:3]`` is used (position-only IK).
         - ``closedness``: ``float`` — jaw closedness in ``[0, 1]`` (0=open, 1=closed).
-        - ``enabled``: ``bool`` — clutch state (dropped here; lifecycle handled in device).
 
     Output keys:
         - ``ee.x``, ``ee.y``, ``ee.z``: ``float`` — absolute base-frame position target [m].
         - ``ee.wx``, ``ee.wy``, ``ee.wz``: ``float`` — zeros (orientation unconstrained).
         - ``ee.gripper_pos``: ``float`` — absolute jaw target in motor units ``[0, 100]``.
-        - ``wrist_roll``: ``float`` — wrist-roll angle [rad], for :class:`OverwriteWristRollFromAngle`.
     """
 
     def action(self, action: RobotAction) -> RobotAction:
         ee_pose = action.pop("ee_pose")
-        wrist_roll = float(action.pop("wrist_roll"))
-        action.pop("wrist_pitch", None)
         closedness = float(action.pop("closedness"))
-        action.pop("enabled", None)
 
         action["ee.x"] = float(ee_pose[0])
         action["ee.y"] = float(ee_pose[1])
@@ -96,13 +88,12 @@ class MapXRControllerActionToRobotAction(RobotActionProcessorStep):
         action["ee.wz"] = 0.0
         # Inverted: closedness c=1 (closed) -> 0, c=0 (open) -> 100 (SO-101 calibration).
         action["ee.gripper_pos"] = (1.0 - closedness) * _GRIPPER_MOTOR_SCALE
-        action["wrist_roll"] = wrist_roll
         return action
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
-        for feat in ["ee_pose", "wrist_pitch", "closedness", "enabled"]:
+        for feat in ["ee_pose", "closedness"]:
             features[PipelineFeatureType.ACTION].pop(feat, None)
 
         for feat in [
@@ -113,7 +104,6 @@ class MapXRControllerActionToRobotAction(RobotActionProcessorStep):
             "ee.wy",
             "ee.wz",
             "ee.gripper_pos",
-            "wrist_roll",
         ]:
             features[PipelineFeatureType.ACTION][feat] = PolicyFeature(type=FeatureType.ACTION, shape=(1,))
 

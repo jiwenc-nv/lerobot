@@ -20,12 +20,11 @@ These tests deliberately do NOT import ``isaacteleop`` — the processor steps a
 the pure-math bridge between the XR teleoperator and the closed-loop IK pipeline,
 and must be testable without the XR runtime.
 
-The clutch / roll / gripper lifecycle (engage latch, no-teleport, reset, hold
-while stopped) lives in Isaac Teleop's three SO-101 retargeters and is covered by
-their own sim-free suite (``test_so101_retargeters.py`` on the Teleop side); it is
-deliberately NOT duplicated here. These tests cover only the LeRobot-side glue:
-the stateless absolute-pose mapper, the static ``base_T_anchor`` config matrix,
-and the post-IK wrist-roll overwrite.
+The clutch (engage latch, no-teleport, hold while disengaged) now lives in the
+owning loop (``examples/isaac_teleop_to_so101/teleoperate.py``); it is not part of
+these processor steps. These tests cover only the LeRobot-side glue: the stateless
+absolute-pose mapper, the static ``base_T_anchor`` config matrix, and the post-IK
+wrist-roll overwrite (a standalone step still available for richer pipelines).
 """
 
 import numpy as np
@@ -44,14 +43,11 @@ from lerobot.teleoperators.isaac_teleop.xr_controller_processor import (
 _IDENTITY_QUAT = (0.0, 0.0, 0.0, 1.0)
 
 
-def _make_action(pos, quat=_IDENTITY_QUAT, closedness=1.0, wrist_roll=0.0, wrist_pitch=0.0, enabled=True):
+def _make_action(pos, quat=_IDENTITY_QUAT, closedness=1.0):
     ee_pose = np.asarray([*pos, *quat], dtype=np.float32)
     return {
         "ee_pose": ee_pose,
-        "wrist_roll": float(wrist_roll),
-        "wrist_pitch": float(wrist_pitch),
         "closedness": float(closedness),
-        "enabled": bool(enabled),
     }
 
 
@@ -78,29 +74,19 @@ def test_mapper_writes_absolute_position_from_ee_pose():
 
 def test_mapper_is_stateless_across_frames():
     # No engage-home / delta accumulation: each frame's ee.* depends only on that
-    # frame's ee_pose, regardless of prior frames or the enabled flag.
+    # frame's ee_pose (the clutch upstream owns all per-frame state).
     step = MapXRControllerActionToRobotAction()
-    step.action(_make_action([5.0, 5.0, 5.0], enabled=True))
-    out = step.action(_make_action([1.0, 2.0, 3.0], enabled=False))
+    step.action(_make_action([5.0, 5.0, 5.0]))
+    out = step.action(_make_action([1.0, 2.0, 3.0]))
     assert np.allclose(_ee(out), [1.0, 2.0, 3.0])
 
 
-def test_mapper_orientation_is_zero_at_zero_pitch():
-    # With no pitch command the orientation target is the zero rotvec (identity).
-    # The ee_pose quaternion is ignored -- pitch comes from the dedicated channel.
+def test_mapper_orientation_is_zero():
+    # Position-only IK: the orientation target is always the zero rotvec, and the
+    # ee_pose quaternion is ignored (no operator orientation channel).
     step = MapXRControllerActionToRobotAction()
-    out = step.action(_make_action([1.0, 2.0, 3.0], quat=(0.1, 0.2, 0.3, 0.927), wrist_pitch=0.0))
+    out = step.action(_make_action([1.0, 2.0, 3.0], quat=(0.1, 0.2, 0.3, 0.927)))
     assert np.allclose(_ee_orientation(out), 0.0, atol=1e-12)
-
-
-def test_mapper_orientation_encodes_pitch_about_base_y():
-    # A nonzero absolute pitch is encoded as a rotvec about base Y (the pitch axis):
-    # ee.wy == pitch, ee.wx == ee.wz == 0.
-    step = MapXRControllerActionToRobotAction()
-    out = step.action(_make_action([0.0, 0.0, 0.0], wrist_pitch=0.5))
-    assert out["ee.wx"] == pytest.approx(0.0)
-    assert out["ee.wy"] == pytest.approx(0.5)
-    assert out["ee.wz"] == pytest.approx(0.0)
 
 
 def test_mapper_emits_all_six_ee_components():
@@ -123,17 +109,11 @@ def test_mapper_gripper_pos_inverts_closedness(closedness, expected):
     assert out["ee.gripper_pos"] == pytest.approx(expected)
 
 
-def test_mapper_wrist_roll_passes_through():
-    step = MapXRControllerActionToRobotAction()
-    out = step.action(_make_action([0.0, 0.0, 0.0], wrist_roll=0.7))
-    assert out["wrist_roll"] == pytest.approx(0.7)
-
-
 def test_mapper_consumes_input_keys():
-    # ee_pose / wrist_pitch / closedness / enabled are popped; they must not leak downstream.
+    # ee_pose / closedness are popped; they must not leak downstream.
     step = MapXRControllerActionToRobotAction()
     out = step.action(_make_action([0.0, 0.0, 0.0]))
-    for key in ["ee_pose", "wrist_pitch", "closedness", "enabled"]:
+    for key in ["ee_pose", "closedness"]:
         assert key not in out
 
 
@@ -144,16 +124,13 @@ def test_mapper_transform_features_swaps_keys():
     features = {
         PipelineFeatureType.ACTION: {
             "ee_pose": PolicyFeature(type=FeatureType.ACTION, shape=(7,)),
-            "wrist_roll": PolicyFeature(type=FeatureType.ACTION, shape=(1,)),
-            "wrist_pitch": PolicyFeature(type=FeatureType.ACTION, shape=(1,)),
             "closedness": PolicyFeature(type=FeatureType.ACTION, shape=(1,)),
-            "enabled": PolicyFeature(type=FeatureType.ACTION, shape=(1,)),
         }
     }
     out = step.transform_features(features)[PipelineFeatureType.ACTION]
-    for popped in ["ee_pose", "wrist_pitch", "closedness", "enabled"]:
+    for popped in ["ee_pose", "closedness"]:
         assert popped not in out
-    for added in ["ee.x", "ee.y", "ee.z", "ee.wx", "ee.wy", "ee.wz", "ee.gripper_pos", "wrist_roll"]:
+    for added in ["ee.x", "ee.y", "ee.z", "ee.wx", "ee.wy", "ee.wz", "ee.gripper_pos"]:
         assert added in out
 
 
@@ -181,10 +158,6 @@ def test_base_t_anchor_default_is_a_proper_rotation():
 def test_base_t_anchor_default_matches_module_constant():
     # The config field defaults to the module-level constant (single source of truth).
     assert XRControllerConfig().base_T_anchor == _DEFAULT_BASE_T_ANCHOR
-
-
-def test_home_base_t_ee_defaults_to_none():
-    assert XRControllerConfig().home_base_T_ee is None
 
 
 # ----------------------------------------------------------------------------

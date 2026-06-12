@@ -18,13 +18,14 @@
 
 ``XRController`` is the first concrete :class:`IsaacTeleopTeleoperator` device
 (see :mod:`lerobot.teleoperators.isaac_teleop.base` for the multi-device
-pattern). It wires an Isaac Teleop retargeting pipeline (the three SO-101
-retargeters) that turns a single XR controller into a clutch-rebased
-end-effector pose, a wrist-roll angle, an absolute wrist-pitch angle, an analog
-gripper closedness, and a clutch (``enabled``) signal. The output dict from
-:meth:`XRController.get_action` is
-designed to feed LeRobot's existing closed-loop IK pipeline (the same one phone
-teleoperation uses) via :class:`MapXRControllerActionToRobotAction`.
+pattern). It is a deliberately thin reader: it exposes the **raw** XR controller
+grip pose straight off Isaac Teleop's ``ControllersSource`` (statically rebased
+into the robot base frame by ``ControllerTransform``), plus the squeeze and
+trigger analog values. There are **no** retargeters and **no** clutch/roll/
+gripper logic in this device — the clutch rebasing (latch the controller origin
+on engage, drive the EE from the delta) and the gripper mapping live downstream
+in the owning loop (see ``examples/isaac_teleop_to_so101/teleoperate.py``), so
+this device carries no per-frame state of its own.
 
 The shared ``TeleopSession`` lifecycle and per-step health guard live on the
 base class; this module only adds the controller-specific pipeline and action
@@ -53,21 +54,16 @@ _BASE_T_ANCHOR_INPUT = "base_T_anchor"
 
 
 class XRController(IsaacTeleopTeleoperator):
-    """XR controller -> EE pose + wrist roll + wrist pitch + gripper + clutch teleoperator.
+    """Raw XR controller grip-pose teleoperator (base-frame), no retargeters.
 
-    Wraps Isaac Teleop's three SO-101 retargeters (``SO101ClutchRetargeter``,
-    ``SO101WristRetargeter``, ``SO101GripperRetargeter``) behind a single
-    ``ControllersSource`` that is statically rebased into the robot base frame
-    (``base_T_anchor``) by Isaac Teleop's native ``ControllerTransform``. The wrist
-    retargeter emits both an engage-relative roll and an absolute world-elevation
-    pitch (the latter recovered from the controller's AIM/pointer ray).
-
-    Squeezing the controller grip past
-    :attr:`XRControllerConfig.clutch_threshold` drives the session to ``RUNNING``;
-    releasing it drives ``STOPPED`` and freezes the robot, exactly like the phone
-    teleoperator's hold-to-enable button. The clutch retargeter latches its
-    engage origin on the RUNNING edge (Play), so the arm does not teleport at
-    engage — the lifecycle is owned by the retargeters, not re-derived here.
+    Wraps a single Isaac Teleop ``ControllersSource`` statically rebased into the
+    robot base frame (``base_T_anchor``) by Isaac Teleop's native
+    ``ControllerTransform``, and reads the raw grip pose + squeeze + trigger off
+    it each frame. There are no SO-101 retargeters and no clutch in this device:
+    :meth:`get_action` returns the controller's absolute base-frame grip pose
+    untouched. The owning loop owns the clutch (latch the engage origin, drive the
+    EE from the delta) and the gripper mapping, so this device is stateless across
+    frames.
     """
 
     config_class = XRControllerConfig
@@ -76,12 +72,6 @@ class XRController(IsaacTeleopTeleoperator):
     def __init__(self, config: XRControllerConfig):
         super().__init__(config)
         self.config: XRControllerConfig = config
-
-        # Clutch state from the PREVIOUS frame: the execution events for frame N
-        # are built from frame N-1's squeeze so RUNNING/STOPPED reflects the most
-        # recent reading available when the session steps. The resulting one-frame
-        # (~33 ms at 30 FPS) latency is a small lag, NOT a snap.
-        self._enabled = False
 
         # Build the constant base_T_anchor input ONCE (a TensorGroup is a heavy,
         # isaacteleop-backed object), then reuse it every step. Constructed lazily
@@ -93,33 +83,19 @@ class XRController(IsaacTeleopTeleoperator):
     # ------------------------------------------------------------------
 
     def _build_pipeline(self) -> OutputCombiner:
-        """Build the XR controller retargeting pipeline.
+        """Build the raw-grip-pose pipeline (no retargeters).
 
-        Reuses the three Isaac Teleop SO-101 retargeters (5-DOF arm) behind a
-        single ``ControllersSource`` that is statically rebased into the robot
-        base frame by ``ControllerTransform`` (``controllers.transformed(...)``)
-        before the retargeters consume it::
+        A single ``ControllersSource`` statically rebased into the robot base
+        frame by ``ControllerTransform`` (``controllers.transformed(...)``); the
+        transformed controller stream is exposed verbatim as ``"controller"``::
 
-            ControllersSource ── .transformed(base_T_anchor) ─┬─ SO101ClutchRetargeter ── ee_pose (7D, base frame)
-                                                              ├─ SO101WristRetargeter ─┬─ roll_command (rad)
-                                                              │                        └─ pitch_command (rad)
-                                                              └─ SO101GripperRetargeter ─ gripper_command (closedness [0,1])
+            ControllersSource ── .transformed(base_T_anchor) ── controller (base-frame grip pose + buttons/axes)
 
-        The transformed controller stream is also exposed as ``"controller"``;
-        :meth:`get_action` reads ``SQUEEZE_VALUE`` off it (``ControllerTransform``
-        copies the buttons/axes through verbatim, so no separate raw passthrough
-        node is needed). The clutch is seeded with ``home_base_T_ee`` and latches
-        its engage origin on the session RUNNING edge.
+        :meth:`get_action` reads the grip pose, squeeze, and trigger straight off
+        that stream (``ControllerTransform`` rotates the grip pose into the base
+        frame and copies the buttons/axes through verbatim). The clutch and
+        gripper mapping live in the owning loop, so no retargeters are wired here.
         """
-        from isaacteleop.retargeters import (
-            SO101ClutchRetargeter,
-            SO101GripperRetargeter,
-            SO101WristRetargeter,
-        )
-        from isaacteleop.retargeters.SO101.wrist_retargeter import (
-            PITCH_COMMAND_KEY,
-            ROLL_COMMAND_KEY,
-        )
         from isaacteleop.retargeting_engine.deviceio_source_nodes import ControllersSource
         from isaacteleop.retargeting_engine.interface import OutputCombiner, ValueInput
         from isaacteleop.retargeting_engine.tensor_types import TransformMatrix
@@ -133,39 +109,7 @@ class XRController(IsaacTeleopTeleoperator):
         transformed = controllers.transformed(xform.output("value"))
         ctrl = transformed.output(controller_key)
 
-        home_base_T_ee = None  # noqa: N806  (frameA_T_frameB transform-matrix convention)
-        if self.config.home_base_T_ee is not None:
-            home_base_T_ee = np.asarray(self.config.home_base_T_ee, dtype=np.float32)  # noqa: N806
-
-        # Clutch-rebased absolute EE pose -> 7D ee_pose (output key "ee_pose").
-        clutch = SO101ClutchRetargeter(
-            name="ee_pose", input_device=controller_key, home_base_T_ee=home_base_T_ee
-        )
-        connected_clutch = clutch.connect({controller_key: ctrl})
-
-        # Wrist retargeter (right hand): emits two scalar channels off the same
-        # transformed controller stream --
-        #   - roll [rad]: engage-relative swing-twist about the controller's LOCAL Z
-        #     axis since engage (output group ROLL_COMMAND_KEY);
-        #   - pitch [rad]: absolute world-elevation of the controller's AIM (pointer)
-        #     ray above horizontal (output group PITCH_COMMAND_KEY). Measured in the
-        #     base frame because the controller stream is already base-rebased.
-        wrist = SO101WristRetargeter(name="wrist", input_device=controller_key)
-        connected_wrist = wrist.connect({controller_key: ctrl})
-
-        # Proportional jaw closedness [0,1] (output group "gripper_command").
-        gripper = SO101GripperRetargeter(name="gripper", input_device=controller_key)
-        connected_gripper = gripper.connect({controller_key: ctrl})
-
-        return OutputCombiner(
-            {
-                "ee_pose": connected_clutch.output("ee_pose"),
-                "roll": connected_wrist.output(ROLL_COMMAND_KEY),
-                "pitch": connected_wrist.output(PITCH_COMMAND_KEY),
-                "gripper": connected_gripper.output("gripper_command"),
-                "controller": ctrl,
-            }
-        )
+        return OutputCombiner({"controller": ctrl})
 
     def _build_external_inputs(self) -> dict[str, Any]:
         """Materialize the constant ``base_T_anchor`` external input (once, in connect)."""
@@ -181,17 +125,17 @@ class XRController(IsaacTeleopTeleoperator):
         # Built after a successful connect so a failed connect leaves no half-state.
         self._external_inputs = self._build_external_inputs()
 
-    def _execution_events_from_squeeze(self, *, enabled: bool) -> ExecutionEvents:
-        """Build the session ``ExecutionEvents`` for this frame from the clutch.
+    def _running_events(self) -> ExecutionEvents:
+        """Build a constant ``RUNNING`` ``ExecutionEvents`` for this frame.
 
-        ``RUNNING`` while the clutch is engaged, ``STOPPED`` otherwise; the clutch
-        retargeter latches its engage origin on the RUNNING edge. ``reset`` is left
-        ``False`` here (per-episode reset wiring is deferred to the record loop).
+        There is no clutch retargeter to gate, so the session is always driven
+        ``RUNNING`` to keep the controller stream flowing; the engage clutch lives
+        in the owning loop and keys off the squeeze, not the session lifecycle.
+        ``reset`` is left ``False`` (per-episode reset wiring is deferred).
         """
         from isaacteleop.retargeting_engine.interface import ExecutionEvents, ExecutionState
 
-        state = ExecutionState.RUNNING if enabled else ExecutionState.STOPPED
-        return ExecutionEvents(execution_state=state, reset=False)
+        return ExecutionEvents(execution_state=ExecutionState.RUNNING, reset=False)
 
     # ------------------------------------------------------------------
     # Action features
@@ -200,30 +144,25 @@ class XRController(IsaacTeleopTeleoperator):
     @property
     def action_features(self) -> dict:
         return {
-            "ee_pose": {
+            "grip_pos": {
                 "dtype": "float32",
-                "shape": (7,),
-                "names": {"x": 0, "y": 1, "z": 2, "qx": 3, "qy": 4, "qz": 5, "qw": 6},
+                "shape": (3,),
+                "names": {"x": 0, "y": 1, "z": 2},
             },
-            # ``get_action`` returns scalars for these three, so the advertised
+            "grip_quat": {
+                "dtype": "float32",
+                "shape": (4,),
+                "names": {"qx": 0, "qy": 1, "qz": 2, "qw": 3},
+            },
+            # ``get_action`` returns scalars for these two, so the advertised
             # shape is () (0-d) to stay consistent with the returned values.
-            "wrist_roll": {
+            "squeeze": {
                 "dtype": "float32",
                 "shape": (),
                 "names": None,
             },
-            "wrist_pitch": {
+            "trigger": {
                 "dtype": "float32",
-                "shape": (),
-                "names": None,
-            },
-            "closedness": {
-                "dtype": "float32",
-                "shape": (),
-                "names": None,
-            },
-            "enabled": {
-                "dtype": "bool",
                 "shape": (),
                 "names": None,
             },
@@ -238,79 +177,62 @@ class XRController(IsaacTeleopTeleoperator):
     # ------------------------------------------------------------------
 
     def get_action(self) -> RobotAction:
-        """Step the Isaac Teleop session and return EE pose + roll + pitch + gripper + clutch.
+        """Step the Isaac Teleop session and return the raw base-frame grip pose.
 
-        Drives the session lifecycle from the clutch: the ``ExecutionEvents`` for
-        this step are built from the PREVIOUS frame's squeeze (the freshest reading
-        available when the session steps), and the static ``base_T_anchor`` rebase
-        is supplied as a constant external input. After stepping, ``enabled`` is
-        recomputed from THIS frame's squeeze (for the device output and to drive
-        next frame's lifecycle). The one-frame (~33 ms at 30 FPS) lag between
-        squeeze and RUNNING is a small latency, not a snap. Because ``_enabled``
-        starts ``False``, the very first step is always STOPPED regardless of the
-        initial squeeze; engagement takes effect on the following step.
+        Steps the session ``RUNNING`` (there is no clutch lifecycle to gate) with
+        the static ``base_T_anchor`` rebase supplied as a constant external input,
+        then reads the grip pose + squeeze + trigger straight off the transformed
+        controller stream. No clutch, no per-frame state: the owning loop latches
+        the engage origin and rebases the delta onto the EE.
+
+        When the controller is not tracked this frame, the squeeze/trigger are
+        reported as ``0.0`` and the grip pose as the last-known zeros, so the
+        owning loop sees "not engaged" and freezes the arm safely.
 
         Returns:
             A ``RobotAction`` dict with keys:
 
-            - ``"ee_pose"``: ``np.ndarray`` shape ``(7,)`` — clutch-rebased
-              absolute pose ``[x, y, z, qx, qy, qz, qw]`` in the robot base
-              frame (position in metres).
-            - ``"wrist_roll"``: ``float`` — wrist-roll angle in **radians**
-              (swing-twist about the controller's local Z, measured since engage).
-            - ``"wrist_pitch"``: ``float`` — wrist-pitch angle in **radians**
-              (absolute world-elevation of the controller AIM ray above horizontal,
-              in the robot base frame).
-            - ``"closedness"``: ``float`` — jaw closedness in ``[0, 1]``
-              (``0`` = open, ``1`` = closed).
-            - ``"enabled"``: ``bool`` — clutch state (squeeze held past
-              ``clutch_threshold``). Drives the session lifecycle; consumed by
-              the downstream pipeline as the device->lifecycle signal.
+            - ``"grip_pos"``: ``np.ndarray`` shape ``(3,)`` — absolute controller
+              grip position ``[x, y, z]`` [m] in the robot base frame.
+            - ``"grip_quat"``: ``np.ndarray`` shape ``(4,)`` — controller grip
+              orientation quaternion ``[qx, qy, qz, qw]`` in the robot base frame.
+            - ``"squeeze"``: ``float`` — squeeze analog in ``[0, 1]`` (the engage
+              clutch input; thresholded by the owning loop).
+            - ``"trigger"``: ``float`` — trigger analog in ``[0, 1]`` (the gripper
+              input; mapped to a jaw target by the owning loop).
         """
-        # Steps the session and applies the shared staleness/worker-health
-        # guard (see IsaacTeleopTeleoperator._step). The execution events come
-        # from the previous frame's clutch state; the base_T_anchor rebase is a
+        # Steps the session and applies the shared staleness/worker-health guard
+        # (see IsaacTeleopTeleoperator._step). The base_T_anchor rebase is a
         # constant external input.
-        events = self._execution_events_from_squeeze(enabled=self._enabled)
-        result = self._step(execution_events=events, external_inputs=self._external_inputs)
+        result = self._step(execution_events=self._running_events(), external_inputs=self._external_inputs)
 
-        # Retargeter outputs are batched (leading slot/batch dim); index [0]
-        # selects the single tracked controller and drops that dim.
-        # SO101ClutchRetargeter outputs a 7D array: [x, y, z, qx, qy, qz, qw].
-        ee_pose = np.asarray(result["ee_pose"][0], dtype=np.float32)
-        # SO101WristRetargeter emits two scalars: an engage-relative roll [rad] and
-        # an absolute world-elevation pitch [rad] (from the AIM/pointer ray).
-        wrist_roll = float(result["roll"][0])
-        wrist_pitch = float(result["pitch"][0])
-        # SO101GripperRetargeter emits a single closedness scalar in [0, 1].
-        closedness = float(result["gripper"][0])
-
-        # Transformed controller stream -> clutch from the squeeze analog
-        # (ControllerTransform copies buttons/axes through verbatim). When the
-        # controller is not tracked the optional group is None; treat that as
-        # "not engaged" so the robot freezes safely.
         from isaacteleop.retargeting_engine.tensor_types.indices import ControllerInputIndex
 
+        # Transformed controller stream (ControllerTransform rotates the grip pose
+        # into the base frame and copies buttons/axes through verbatim). When the
+        # controller is not tracked the optional group is None; treat that as "not
+        # engaged" (squeeze/trigger = 0.0) so the owning loop freezes the arm.
         controller = result["controller"]
-        # Defensive: a controller group may not be tracked every frame
-        # (untracked/odd frame, missing squeeze axis, unexpected wrapper shape). Any
-        # failure to read the squeeze is treated as "not engaged" (squeeze = 0.0) so
-        # the arm freezes safely instead of crashing the teleop loop.
-        if getattr(controller, "is_none", False):
-            squeeze = 0.0
-        else:
+        grip_pos = np.zeros(3, dtype=np.float32)
+        grip_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        squeeze = 0.0
+        trigger = 0.0
+        if not getattr(controller, "is_none", False):
+            # Defensive: a controller group may not be fully populated every frame
+            # (untracked/odd frame, missing axis, unexpected wrapper shape). Any
+            # read failure leaves the safe defaults above so the loop freezes the
+            # arm instead of crashing.
             try:
+                grip_pos = np.asarray(controller[ControllerInputIndex.GRIP_POSITION], dtype=np.float32)
+                grip_quat = np.asarray(controller[ControllerInputIndex.GRIP_ORIENTATION], dtype=np.float32)
                 squeeze = float(controller[ControllerInputIndex.SQUEEZE_VALUE])
+                trigger = float(controller[ControllerInputIndex.TRIGGER_VALUE])
             except (IndexError, KeyError, TypeError, ValueError):
-                squeeze = 0.0
-        enabled = bool(squeeze > self.config.clutch_threshold)
-        # Store for next frame's execution events (one-frame delay, see docstring).
-        self._enabled = enabled
+                pass
 
         return {
-            "ee_pose": ee_pose,
-            "wrist_roll": wrist_roll,
-            "wrist_pitch": wrist_pitch,
-            "closedness": closedness,
-            "enabled": enabled,
+            "grip_pos": grip_pos,
+            "grip_quat": grip_quat,
+            "squeeze": squeeze,
+            "trigger": trigger,
         }
