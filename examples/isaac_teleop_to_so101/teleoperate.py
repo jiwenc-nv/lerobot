@@ -427,17 +427,21 @@ def main():
         trigger = float(xr_action["trigger"])
         enabled = squeeze > teleop_config.clutch_threshold
 
-        # ── Dry-run: throttled raw + base-frame readout for frame validation ──
-        # Move the controller along each room axis and watch grip_pos(base) to verify
-        # the base_T_anchor mapping; hold it still and rotate your head to verify the
-        # anchor is base-fixed (values should not move); squeeze/trigger should sweep
-        # 0.00 -> 1.00.
-        if args.dry_run and _frame % max(1, FPS // 4) == 0:
-            rotvec = Rotation.from_quat(grip_quat).as_rotvec()
+        # ── Dry-run: throttled raw readout while DISENGAGED ───────────────────
+        # While engaged, the [DEBUG] heartbeat already prints the robot-space IK target
+        # each second, so this only fires when disengaged. grip_pos is the RAW
+        # controller position BEFORE the clutch: base_T_anchor is rotation-only, so only
+        # the AXES are converted to robot convention — the ORIGIN stays the XR/world
+        # origin (the clutch absorbs that offset via the engage-relative delta, so only
+        # axis alignment matters here). Checks: move along each room axis to verify the
+        # axis map; hold still + rotate your head to verify the anchor is base-fixed
+        # (values should not move); squeeze/trigger should sweep 0.00 -> 1.00.
+        if args.dry_run and not enabled and _frame % max(1, FPS // 4) == 0:
+            grip_rv = Rotation.from_quat(grip_quat).as_rotvec()
             print(
-                f"[DRY] enabled={int(enabled)} squeeze={squeeze:4.2f} trigger={trigger:4.2f} | "
-                f"grip_pos(base)={np.array2string(grip_pos, precision=3, sign='+')} "
-                f"grip_rotvec(base)={np.array2string(rotvec, precision=3, sign='+')}"
+                f"[DRY] squeeze={squeeze:4.2f} trigger={trigger:4.2f} | "
+                f"grip_pos(world-origin, robot-axes)={np.array2string(grip_pos, precision=3, sign='+')} "
+                f"grip_rotvec={np.array2string(grip_rv, precision=3, sign='+')}"
             )
 
         # Compute once per frame; used in the debug blocks below and then
