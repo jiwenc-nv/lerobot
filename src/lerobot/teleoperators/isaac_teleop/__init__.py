@@ -18,12 +18,15 @@
 
 Isaac Teleop is a multi-modal teleoperation framework. Each input device is a
 :class:`IsaacTeleopTeleoperator` subclass: :class:`XRController` (XR/VR
-controller) ships today; Manus gloves, hand tracking, and full-body tracking
-are the natural next devices (add a ``teleop_<device>.py`` + device config).
+controller) and :class:`SO101LeaderArm` (a back-drivable SO-101 leader arm on
+the generic joint-space device path) ship today; Manus gloves, hand tracking,
+and full-body tracking are the natural next devices (add a ``teleop_<device>.py``
++ device config).
 """
 
 from .base import IsaacTeleopTeleoperator
-from .config_isaac_teleop import IsaacTeleopConfig, XRControllerConfig
+from .config_isaac_teleop import IsaacTeleopConfig, SO101LeaderArmConfig, XRControllerConfig
+from .teleop_so101_leader_arm import SO101LeaderArm, leader_joints_to_robot_action
 from .teleop_xr_controller import XRController
 from .wrist_roll_processor import OverwriteWristRollFromAngle
 from .xr_controller_processor import MapXRControllerActionToRobotAction
@@ -33,6 +36,9 @@ __all__ = [
     "IsaacTeleopTeleoperator",
     "MapXRControllerActionToRobotAction",
     "OverwriteWristRollFromAngle",
+    "SO101LeaderArm",
+    "SO101LeaderArmConfig",
     "XRController",
     "XRControllerConfig",
+    "leader_joints_to_robot_action",
 ]

@@ -119,3 +119,53 @@ class XRControllerConfig(IsaacTeleopConfig):
     rotation. Kept as plain nested lists (not numpy) so the config stays serializable; the
     device materializes it to a float32 4x4 once at construction.
     """
+
+
+# Provisional gripper open/close endpoints [rad] for the leader's gripper DOF, used to
+# normalize the streamed gripper angle into the follower's RANGE_0_100 jaw target. These
+# defaults are derived from the so101_leader plugin README's *example* calibration
+# (home_ticks=2048, range 2000..3000 ticks; angle = (ticks - home) * 2*pi / 4096):
+#   range_min 2000 ticks -> (2000-2048)*2*pi/4096 = -0.074 rad
+#   range_max 3000 ticks -> (3000-2048)*2*pi/4096 = +1.460 rad
+# They are almost certainly wrong for any specific arm.
+# TODO(verify-on-hardware): run the plugin's ``calibrate`` subcommand -- it prints the
+# gripper's open/close endpoints in radians -- and set gripper_open_rad / gripper_close_rad
+# from that. If the jaw moves the wrong way (opens when it should close), swap the two values.
+_DEFAULT_GRIPPER_OPEN_RAD = -0.074
+_DEFAULT_GRIPPER_CLOSE_RAD = 1.460
+
+
+@TeleoperatorConfig.register_subclass("isaac_teleop_so101_leader")
+@dataclass(kw_only=True)
+class SO101LeaderArmConfig(IsaacTeleopConfig):
+    """Config for an Isaac Teleop SO-101 *leader arm* (generic joint-space device).
+
+    Drives a follower SO-101 by mirroring the leader's joint angles 1:1 (direct joint
+    drive, like ``lerobot-teleoperate`` with the serial ``so101_leader``). The leader's
+    joint state is streamed as a ``JointStateOutput`` FlatBuffer by NVIDIA Isaac Teleop's
+    ``so101_leader`` plugin over the OpenXR tensor transport and read here via a
+    ``JointStateSource`` (see
+    :class:`~lerobot.teleoperators.isaac_teleop.teleop_so101_leader_arm.SO101LeaderArm`).
+
+    Units: the plugin streams every joint -- gripper included -- in **radians**. The device
+    converts the arm joints to degrees (``rad2deg``) and the gripper to the follower's
+    RANGE_0_100 jaw target, so :meth:`SO101LeaderArm.get_action` returns follower-ready
+    ``{joint}.pos`` values that can be sent straight to ``robot.send_action`` (no IK, no
+    clutch, no retargeter on the LeRobot side).
+    """
+
+    collection_id: str = "so101_leader"
+    """Tensor collection id the leader plugin pushes on; must match the running
+    ``so101_leader`` plugin (its second positional arg, default ``"so101_leader"``)."""
+
+    gripper_joint: str = "gripper"
+    """Name of the gripper DOF among the streamed joints (converted to RANGE_0_100;
+    every other joint is converted ``rad2deg``)."""
+
+    gripper_open_rad: float = _DEFAULT_GRIPPER_OPEN_RAD
+    """Leader gripper angle [rad] at fully OPEN -> follower jaw 100. Provisional default;
+    set from the plugin's ``calibrate`` subcommand. See ``_DEFAULT_GRIPPER_OPEN_RAD``."""
+
+    gripper_close_rad: float = _DEFAULT_GRIPPER_CLOSE_RAD
+    """Leader gripper angle [rad] at fully CLOSED -> follower jaw 0. Provisional default;
+    set from the plugin's ``calibrate`` subcommand. See ``_DEFAULT_GRIPPER_CLOSE_RAD``."""
