@@ -25,11 +25,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import ClassVar
 
+from draccus import ChoiceRegistry
+
 from lerobot.teleoperators.config import TeleoperatorConfig
 
 
 @dataclass(kw_only=True)
-class IsaacTeleopConfig(TeleoperatorConfig):
+class IsaacTeleopConfig(TeleoperatorConfig, ChoiceRegistry):
     """Shared config for all Isaac Teleop-backed teleoperators.
 
     Uses its own draccus ``_choice_registry`` (decoupled from the global
@@ -38,6 +40,10 @@ class IsaacTeleopConfig(TeleoperatorConfig):
     short names (``xr_controller``, ``so101_leader``) without colliding with the global
     registry. These devices are selected by the example scripts, not routed through
     ``make_teleoperator_from_config``.
+
+    The redundant ``ChoiceRegistry`` base is load-bearing: draccus >= 0.11 only honors
+    ``--teleop.type`` for a *direct* subclass of it, and dropping it silently degrades this
+    class to a plain nested dataclass.
     """
 
     _choice_registry: ClassVar[dict] = {}
