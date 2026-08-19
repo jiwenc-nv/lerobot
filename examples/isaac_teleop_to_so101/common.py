@@ -20,7 +20,8 @@ Consumed by ``teleoperate.py`` and ``record.py``, which both build a per-device
 :class:`Device` bundle and run the same loop: read -> (maybe command) -> hold-when-idle ->
 sleep. A :class:`Device` bundles ``compute(obs) -> RobotAction | None`` (``None`` = hold at
 the measured pose while idle), ``startup``, ``cleanup``, plus ``engaged`` and ``reset``,
-which ``record.py`` uses to end an episode on declutch. The devices:
+which both entry points use to send the arm home on declutch — ``record.py`` also ends the
+recorded episode there. The devices:
 
 * ``xr_controller`` — an :class:`XRController` whose in-pipeline clutch retargeter emits an
   absolute base-frame EE target for LeRobot's Cartesian IK pipeline.
@@ -95,9 +96,8 @@ class LoopConfig(Protocol):
 # Per-device bundle consumed by the shared loop. ``compute`` returns None to mean
 # "idle -> hold at the measured pose"; ``startup`` warms up; ``cleanup`` reaps/disconnects.
 # ``engaged`` reports the clutch state of the frame ``compute`` last processed, and ``reset``
-# returns the arm to its reset pose between recorded episodes. The defaults describe a device
-# with no clutch and no reset pose (the leader arm): always engaged, so the declutch edge
-# ``record.py`` watches for never fires.
+# returns the arm to its reset pose. The defaults describe a device with no clutch and no reset
+# pose (the leader arm): always engaged, so the declutch edge the loops watch for never fires.
 @dataclass(frozen=True)
 class Device:
     compute: Callable[[RobotObservation | None], RobotAction | None]
@@ -136,11 +136,12 @@ class HoldLatch:
 
 
 class DeclutchLatch:
-    """Detect the end-of-episode declutch: the first engaged -> disengaged transition.
+    """Detect the declutch that ends a segment: the first engaged -> disengaged transition.
 
-    Arms on the first engaged frame, so an episode that starts disengaged (the operator has
-    not squeezed yet) is not ended on frame 0. One instance per episode; once it has fired it
-    keeps reporting True. Devices with no clutch report ``engaged`` forever, so it never fires.
+    Arms on the first engaged frame, so a segment that starts disengaged (the operator has not
+    squeezed yet) is not ended on frame 0. One instance per segment — a recorded episode, or one
+    teleoperate squeeze; once it has fired it keeps reporting True. Devices with no clutch report
+    ``engaged`` forever, so it never fires.
     """
 
     def __init__(self):
@@ -379,11 +380,12 @@ def setup_xr(cfg: LoopConfig, robot, motor_names: list[str]) -> Device:
     def reset() -> None:
         """Slew the arm to its reset pose and re-home the clutch there.
 
-        Runs at startup and again in every reset window between recorded episodes. The device
-        holds STOPPED across the slew (stepped once so the state lands first) — the readiness
-        interlock, not a formality: a squeeze mid-slew would otherwise latch the clutch against
-        a home the arm has not reached yet. The clutch is then seeded from the post-slew
-        MEASURED pose and the interlock released, so the next engage is jump-free.
+        Runs at startup, on every declutch in ``teleoperate.py``, and in every reset window
+        between recorded episodes. The device holds STOPPED across the slew (stepped once so the
+        state lands first) — the readiness interlock, not a formality: a squeeze mid-slew would
+        otherwise latch the clutch against a home the arm has not reached yet. The clutch is then
+        seeded from the post-slew MEASURED pose and the interlock released, so the next engage is
+        jump-free.
         """
         nonlocal clutch_engaged
         teleop_device.stop()
