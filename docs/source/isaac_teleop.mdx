@@ -341,6 +341,14 @@ To record a dataset (not just teleoperate), use `record.py` in the same folder. 
 can drive the follower, and it saves the commanded joints to a LeRobot dataset (`lerobot-record`-style
 `--dataset.*` flags). See its module docstring for the full CLI and the keyboard recording shortcuts.
 
+**The clutch is the episode boundary.** On the XR path an episode ends the moment you release the
+squeeze (having engaged it at least once), the episode is saved, and the arm slews back to its reset
+pose during the reset window — re-homing the clutch there behind the same readiness interlock
+startup uses. One episode is one uninterrupted squeeze, so the mid-task re-clutch described above is
+a teleoperation move, not a recording one. `--reset_to_origin=false` disables the slew (startup and
+between episodes alike), and the leader arm, having no clutch, still ends episodes on
+`--dataset.episode_time_s` or a key.
+
 ## Important pipeline steps and options
 
 The clutch already produces an absolute base‑frame pose, so the processor side is a thin

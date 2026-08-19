@@ -116,6 +116,12 @@ python -m examples.isaac_teleop_to_so101.record \
     --dataset.num_episodes=3 --dataset.episode_time_s=20 --dataset.reset_time_s=5
 ```
 
+With the XR controller the clutch is the episode boundary: releasing the squeeze (after engaging it
+at least once) ends and saves the episode, then the arm slews back to its reset pose during the
+reset window and the clutch is re-homed there. One episode is one uninterrupted squeeze.
+`--reset_to_origin=false` disables the slew (startup and between episodes alike); the leader arm has
+no clutch, so its episodes still end on `--dataset.episode_time_s` or a key.
+
 Keyboard shortcuts (terminal-first, so they work over SSH): **Right/n** end episode early,
 **Left/r** re-record, **Esc/q** stop after the current episode.
 
