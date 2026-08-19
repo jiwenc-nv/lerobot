@@ -210,8 +210,9 @@ def _ensure_so101_urdf() -> str:
     return str(urdf_path)
 
 
-# Default duration [s] for the startup reset-to-origin slew.
-RESET_DURATION_S = 5.0
+# Default duration [s] for the reset-to-origin slew (startup and every declutch): long enough to
+# follow in VR, short enough not to stall the operator between segments.
+RESET_DURATION_S = 2.0
 
 # Optional cached file written by override_reset_pose.py. When present it takes priority over RESET_ORIGIN_DEG.
 RESET_POSE_FILE = str(HF_LEROBOT_HOME / "reset_poses" / "{robot_name}" / "{robot_id}.json")
