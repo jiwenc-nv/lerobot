@@ -31,12 +31,12 @@ This pulls in `motorbridge` (CAN motor control, including the RobStride `add_rob
 
 ## Registered device types
 
-| Type                        | Kind                                          |
-| --------------------------- | --------------------------------------------- |
-| `rebot_b601_rs_follower`    | single-arm B601-RS follower robot             |
-| `bi_rebot_b601_rs_follower` | bimanual (dual-arm) follower robot            |
-| `rebot_102_leader`          | single-arm reBot Arm 102 leader teleoperator  |
-| `bi_rebot_102_leader`       | bimanual (dual-arm) leader teleoperator       |
+| Type                        | Kind                                         |
+| --------------------------- | -------------------------------------------- |
+| `rebot_b601_rs_follower`    | single-arm B601-RS follower robot            |
+| `bi_rebot_b601_rs_follower` | bimanual (dual-arm) follower robot           |
+| `rebot_102_leader`          | single-arm reBot Arm 102 leader teleoperator |
+| `bi_rebot_102_leader`       | bimanual (dual-arm) leader teleoperator      |
 
 The bimanual type composes two single-arm instances and namespaces each arm's
 observation/action keys with a `left_` / `right_` prefix. Per-arm settings are

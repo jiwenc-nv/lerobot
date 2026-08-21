@@ -74,12 +74,8 @@ class RebotB601RSFollowerConfig:
 
     # MIT kp/kd per arm joint (motor order: shoulder_pan..gripper). The gripper
     # entry is unused — the gripper is driven by the impedance torque below.
-    mit_kp: float | list[float] = field(
-        default_factory=lambda: [50.0, 150.0, 150.0, 50.0, 50.0, 50.0, 12.0]
-    )
-    mit_kd: float | list[float] = field(
-        default_factory=lambda: [3.0, 10.0, 10.0, 5.0, 4.0, 4.0, 0.05]
-    )
+    mit_kp: float | list[float] = field(default_factory=lambda: [50.0, 150.0, 150.0, 50.0, 50.0, 50.0, 12.0])
+    mit_kd: float | list[float] = field(default_factory=lambda: [3.0, 10.0, 10.0, 5.0, 4.0, 4.0, 0.05])
 
     # MIT impedance gripper: Kp/Kd of the external impedance torque
     #   tau = Kp*(pos_target - pos) + Kd*(target_vel - vel),

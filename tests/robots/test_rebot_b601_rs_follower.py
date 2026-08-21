@@ -98,7 +98,7 @@ def test_registers_robstride_motors_not_damiao(follower):
 def test_uses_shared_feedback_can_id(follower):
     # All RobStride motors share the 0xFD feedback id.
     for (_send_id, recv_id), motor_name in zip(
-        follower.config.motor_can_ids.values(), follower.motor_names
+        follower.config.motor_can_ids.values(), follower.motor_names, strict=True
     ):
         assert recv_id == 0xFD, f"{motor_name} has non-shared recv_id {recv_id:#x}"
 
@@ -170,8 +170,13 @@ def test_bimanual_forwards_rs_specific_config_fields():
     # (joint_directions + gripper MIT torque limits) to each single arm — they
     # are not present on the Damiao variant, so they must be passed explicitly.
     custom_dirs = {
-        "shoulder_pan": -1.0, "shoulder_lift": -1.0, "elbow_flex": -1.0,
-        "wrist_flex": -1.0, "wrist_yaw": -1.0, "wrist_roll": -1.0, "gripper": -2.0,
+        "shoulder_pan": -1.0,
+        "shoulder_lift": -1.0,
+        "elbow_flex": -1.0,
+        "wrist_flex": -1.0,
+        "wrist_yaw": -1.0,
+        "wrist_roll": -1.0,
+        "gripper": -2.0,
     }
     with patch(f"{_MODULE}.require_package", lambda *a, **kw: None):
         cfg = BiRebotB601RSFollowerConfig(
@@ -339,9 +344,7 @@ def bi_follower():
 def test_bimanual_send_action_routes_prefixes(bi_follower):
     # Guards bimanual safety: left_/right_ actions must route to the correct arm,
     # and the returned action must re-prefix each key.
-    returned = bi_follower.send_action(
-        {"left_shoulder_pan.pos": 30.0, "right_gripper.pos": -10.0}
-    )
+    returned = bi_follower.send_action({"left_shoulder_pan.pos": 30.0, "right_gripper.pos": -10.0})
     # Routed to the right arms.
     bi_follower.left_arm.motors["shoulder_pan"].send_mit.assert_called_once()
     bi_follower.right_arm.motors["gripper"].send_mit.assert_called_once()
@@ -374,4 +377,3 @@ def test_gripper_impedance_uses_move_limit_on_motion(follower):
         < abs(tau_ff)
         <= follower.config.gripper_mit_torque_limit
     )
-

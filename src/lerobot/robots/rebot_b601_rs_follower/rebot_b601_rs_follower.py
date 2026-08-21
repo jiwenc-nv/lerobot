@@ -21,8 +21,8 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from lerobot.cameras import make_cameras_from_configs
+from lerobot.lerobot_types import RobotAction, RobotObservation
 from lerobot.motors import MotorCalibration
-from lerobot.types import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 from lerobot.utils.import_utils import _motorbridge_available, require_package
 
@@ -246,9 +246,7 @@ class RebotB601RSFollower(Robot):
             return None
 
         prev_target = self._gripper_prev_target_pos
-        target_vel = (
-            0.0 if prev_target is None else (pos_target_rad - prev_target) / _GRIPPER_CONTROL_DT_S
-        )
+        target_vel = 0.0 if prev_target is None else (pos_target_rad - prev_target) / _GRIPPER_CONTROL_DT_S
         self._gripper_prev_target_pos = pos_target_rad
 
         prev_filt_vel = self._gripper_prev_filtered_target_vel
