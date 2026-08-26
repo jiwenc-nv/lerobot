@@ -294,7 +294,16 @@ class RebotB601RSFollower(Robot):
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         start = time.perf_counter()
-        obs_dict = {f"{motor}.pos": pos for motor, pos in self._present_pos().items()}
+        # Undo `joint_directions`, which `send_action` applies, so the observation and the
+        # action share one convention. Without this a controller that echoes a measurement
+        # back as a command -- holding the arm where it is, or slewing from the measured pose
+        # toward a target -- commands the negation of it. `_present_pos()` deliberately stays
+        # in raw motor space: `send_action`'s `max_relative_target` guard compares against it
+        # AFTER applying the direction.
+        obs_dict = {
+            f"{motor}.pos": pos / self.config.joint_directions.get(motor, 1.0)
+            for motor, pos in self._present_pos().items()
+        }
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
